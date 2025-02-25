@@ -1,9 +1,13 @@
 #!/bin/bash
+# 使用 Xray 作为 HTTP 和 SOCKS5 代理服务器，支持多 IP 监听
 # 自动检测 VPS 上的公网 IP，并创建 SOCKS5 和 HTTP 代理（端口递增）
 # 适用于 Ubuntu/Debian，确保 SOCKS5 和 HTTP 代理同时可用
-# 修复日志管理、错误处理、服务状态检查，并增强安全性
 
 set -e  # 遇到错误立即退出
+
+# 默认端口
+SOCKS5_START_PORT=20000
+HTTP_START_PORT=30000
 
 # 用户输入代理的用户名和密码
 read -p "Enter Proxy Username: " PROXY_USER
@@ -16,13 +20,37 @@ if [[ -z "$PROXY_USER" ]]; then
     exit 1
 fi
 
-# 确保系统更新并安装必要软件
-echo "[1/6] Updating system and installing required packages..."
-apt update -y && apt install -y dante-server tinyproxy net-tools curl ufw || { echo "Package installation failed!"; exit 1; }
+# 安装 Xray
+install_xray() {
+    echo "安装 Xray..."
+    apt-get update -y
+    apt-get install unzip -y || yum install unzip -y
+    wget https://github.com/XTLS/Xray-core/releases/download/v1.8.3/Xray-linux-64.zip -O /tmp/Xray.zip
+    unzip /tmp/Xray.zip -d /usr/local/bin/
+    mv /usr/local/bin/xray /usr/local/bin/xrayL
+    chmod +x /usr/local/bin/xrayL
+    cat <<EOF >/etc/systemd/system/xrayL.service
+[Unit]
+Description=XrayL Service
+After=network.target
+
+[Service]
+ExecStart=/usr/local/bin/xrayL -c /etc/xrayL/config.json
+Restart=on-failure
+User=nobody
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target
+EOF
+    systemctl daemon-reload
+    systemctl enable xrayL.service
+    echo "Xray 安装完成."
+}
 
 # 获取 VPS 上的所有公网 IP
-echo "[2/6] Detecting Public IPs..."
-IP_LIST=$(ip -o -4 addr show | awk '{print $4}' | cut -d'/' -f1 | grep -E '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$' | grep -v "127.0.0.1")
+echo "[1/4] Detecting Public IPs..."
+IP_LIST=$(hostname -I | tr ' ' '\n' | grep -E '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$')
 
 if [ -z "$IP_LIST" ]; then
     echo "❌ No public IPs detected! Exiting..."
@@ -32,93 +60,62 @@ fi
 echo "✅ Found the following Public IPs:"
 echo "$IP_LIST"
 
-# 设置起始端口
-SOCKS5_PORT=20000
-HTTP_PORT=30000
+# 生成 Xray 配置文件
+config_xray() {
+    echo "[2/4] Configuring Xray..."
+    mkdir -p /etc/xrayL
+    CONFIG_JSON="{\"inbounds\": ["
+    SOCKS5_PORT=$SOCKS5_START_PORT
+    HTTP_PORT=$HTTP_START_PORT
+    for ip in $IP_LIST; do
+        CONFIG_JSON+="{\"port\": $SOCKS5_PORT, \"protocol\": \"socks\", \"settings\": {\"auth\": \"password\", \"accounts\": [{\"user\": \"$PROXY_USER\", \"pass\": \"$PROXY_PASS\"}]}, \"listen\": \"$ip\"},"
+        CONFIG_JSON+="{\"port\": $HTTP_PORT, \"protocol\": \"http\", \"settings\": {\"auth\": \"password\", \"accounts\": [{\"user\": \"$PROXY_USER\", \"pass\": \"$PROXY_PASS\"}]}, \"listen\": \"$ip\"},"
+        SOCKS5_PORT=$((SOCKS5_PORT + 1))
+        HTTP_PORT=$((HTTP_PORT + 1))
+    done
+    CONFIG_JSON=${CONFIG_JSON%,}  # 移除最后的逗号
+    CONFIG_JSON+=\"]}"  # 结束 inbounds
+    echo -e "$CONFIG_JSON" > /etc/xrayL/config.json
+}
 
-# 生成 Dante（SOCKS5）配置文件
-echo "[3/6] Configuring Dante (SOCKS5)..."
-DANTE_CONF="/etc/danted.conf"
-echo "logoutput: /var/log/danted.log" > $DANTE_CONF
+# 启动 Xray 服务
+start_xray() {
+    echo "[3/4] Starting Xray..."
+    systemctl restart xrayL.service || systemctl start xrayL.service
+    sleep 2
+    systemctl status xrayL.service --no-pager
+}
 
+# 开启防火墙端口
+echo "[4/4] Opening firewall ports..."
+SOCKS5_PORT=$SOCKS5_START_PORT
+HTTP_PORT=$HTTP_START_PORT
 for ip in $IP_LIST; do
-    echo "internal: $ip port = $SOCKS5_PORT" >> $DANTE_CONF
-    echo "external: $ip" >> $DANTE_CONF
+    ufw allow $SOCKS5_PORT || true
+    ufw allow $HTTP_PORT || true
+    SOCKS5_PORT=$((SOCKS5_PORT + 1))
+    HTTP_PORT=$((HTTP_PORT + 1))
+done
+ufw reload || true
+
+# 执行安装和配置
+install_xray
+config_xray
+start_xray
+
+echo "======================================"
+echo "✅ Proxy Setup Completed!"
+echo "SOCKS5 Proxies:"
+SOCKS5_PORT=$SOCKS5_START_PORT
+for ip in $IP_LIST; do
+    echo "  - socks5://$PROXY_USER:$PROXY_PASS@$ip:$SOCKS5_PORT"
     SOCKS5_PORT=$((SOCKS5_PORT + 1))
 done
 
-echo "
-method: username
-user.privileged: root
-user.unprivileged: nobody
-client pass {
-    from: 0.0.0.0/0 to: 0.0.0.0/0
-    log: connect disconnect
-}
-socks pass {
-    from: 0.0.0.0/0 to: 0.0.0.0/0
-    log: connect disconnect
-}
-" >> $DANTE_CONF
-
-# 生成 TinyProxy（HTTP 代理）配置文件
-echo "[4/6] Configuring TinyProxy (HTTP)..."
-TINYPROXY_CONF="/etc/tinyproxy.conf"
-echo "PidFile \"/var/run/tinyproxy.pid\"" > $TINYPROXY_CONF
-echo "LogFile \"syslog\"" >> $TINYPROXY_CONF  # 使用 syslog 以避免日志权限问题
-echo "MaxClients 100" >> $TINYPROXY_CONF
-echo "Allow 0.0.0.0/0" >> $TINYPROXY_CONF
-echo "BasicAuth $PROXY_USER $PROXY_PASS" >> $TINYPROXY_CONF
-echo "Timeout 600" >> $TINYPROXY_CONF
-
-echo "Listen 0.0.0.0" >> $TINYPROXY_CONF
-
-echo "Port 30000" >> $TINYPROXY_CONF  # 仅绑定一个端口
-
-# 添加代理用户
-echo "[5/6] Adding Proxy User..."
-if id "$PROXY_USER" &>/dev/null; then
-    echo "User $PROXY_USER already exists, skipping creation."
-else
-    # 创建用户，但不创建 home 目录
-    useradd -M -s /bin/false "$PROXY_USER" || { echo "❌ Failed to add user!"; exit 1; }
-fi
-
-# 设置用户密码
-echo "$PROXY_USER:$PROXY_PASS" | chpasswd
-
-# 开启防火墙端口
-echo "Opening firewall ports..."
-ufw allow 20000 || true
-ufw allow 30000 || true
-ufw reload || true
-
-# 重启代理服务
-echo "Restarting services..."
-systemctl restart danted || { echo "Failed to restart Dante!"; exit 1; }
-systemctl enable danted || true
-systemctl restart tinyproxy || { echo "Failed to restart TinyProxy!"; exit 1; }
-systemctl enable tinyproxy || true
-
-# 检测 HTTP 代理是否正常运行
-echo "Testing HTTP Proxy..."
-sleep 2  # 等待 tinyproxy 启动
-if curl --proxy http://$PROXY_USER:$PROXY_PASS@127.0.0.1:30000 -I http://google.com 2>/dev/null | grep -q "HTTP"; then
-    echo "✅ HTTP Proxy is working!"
-else
-    echo "❌ HTTP Proxy test failed! Restarting service..."
-    systemctl restart tinyproxy
-    sleep 5
-    if curl --proxy http://$PROXY_USER:$PROXY_PASS@127.0.0.1:30000 -I http://google.com 2>/dev/null | grep -q "HTTP"; then
-        echo "✅ HTTP Proxy recovered and working!"
-    else
-        echo "❌ HTTP Proxy still failed! Check logs."
-    fi
-fi
-
-# 输出代理信息
-echo "======================================"
-echo "✅ Proxy Setup Completed!"
-echo "SOCKS5 Proxy: socks5://$PROXY_USER:$PROXY_PASS@$(hostname -I | awk '{print $1}'):20000"
-echo "HTTP Proxy: http://$PROXY_USER:$PROXY_PASS@$(hostname -I | awk '{print $1}'):30000"
+echo "HTTP Proxies:"
+HTTP_PORT=$HTTP_START_PORT
+for ip in $IP_LIST; do
+    echo "  - http://$PROXY_USER:$PROXY_PASS@$ip:$HTTP_PORT"
+    HTTP_PORT=$((HTTP_PORT + 1))
+done
 echo "======================================"
