@@ -1,119 +1,62 @@
 #!/bin/bash
-# Xray 代理安装脚本 - 支持 HTTP & SOCKS5 代理
-# 允许用户自定义用户名 & 密码
-# 适用于 Ubuntu / Debian
+# 3X-UI 一键安装 SOCKS5 + HTTP 代理脚本
+# 作者: skytoyukiout
+# 适用于 Ubuntu / Debian / CentOS
 
 set -e  # 遇到错误立即退出
 
-# 默认端口
-SOCKS5_START_PORT=20000
-HTTP_START_PORT=30000
+# 代理默认端口
+SOCKS5_PORT=20000
+HTTP_PORT=30000
 
-# 让用户输入代理的用户名和密码
-read -p "Enter Proxy Username: " PROXY_USER
-read -s -p "Enter Proxy Password: " PROXY_PASS
+# 用户输入代理的用户名和密码
+read -p "请输入代理用户名 (默认: userb): " PROXY_USER
+PROXY_USER=${PROXY_USER:-userb}
+read -s -p "请输入代理密码 (默认: passwordb): " PROXY_PASS
+PROXY_PASS=${PROXY_PASS:-passwordb}
+echo ""
 
-# 确保用户名和密码不为空
-if [[ -z "$PROXY_USER" || -z "$PROXY_PASS" ]]; then
-    echo "\n❌ Error: Username or password cannot be empty!"
-    exit 1
-fi
-
-# 安装 Xray
-install_xray() {
-    echo "安装 Xray..."
-    apt-get update -y
-    apt-get install unzip -y || yum install unzip -y
-    wget https://github.com/XTLS/Xray-core/releases/download/v1.8.3/Xray-linux-64.zip -O /tmp/Xray.zip
-    unzip /tmp/Xray.zip -d /usr/local/bin/
-    mv /usr/local/bin/xray /usr/local/bin/xrayL
-    chmod +x /usr/local/bin/xrayL
-    cat <<EOF >/etc/systemd/system/xrayL.service
-[Unit]
-Description=XrayL Service
-After=network.target
-
-[Service]
-ExecStart=/usr/local/bin/xrayL -c /etc/xrayL/config.json
-Restart=on-failure
-User=nobody
-RestartSec=3
-
-[Install]
-WantedBy=multi-user.target
-EOF
-    systemctl daemon-reload
-    systemctl enable xrayL.service
-    echo "Xray 安装完成."
+# 安装 3x-ui
+install_3x_ui() {
+    echo "🔹 安装 3X-UI 面板..."
+    bash <(curl -Ls https://raw.githubusercontent.com/mhsanaei/3x-ui/master/install.sh)
+    echo "✅ 3X-UI 安装完成！"
 }
 
-# 获取 VPS 所有公网 IP
-IP_LIST=$(hostname -I | tr ' ' '\n' | grep -E '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$')
-if [ -z "$IP_LIST" ]; then
-    echo "❌ No public IPs detected! Exiting..."
-    exit 1
-fi
-
-echo "✅ Found the following Public IPs:"
-echo "$IP_LIST"
-
-# 生成 Xray 配置文件
-config_xray() {
-    echo "配置 Xray..."
-    mkdir -p /etc/xrayL
-    CONFIG_JSON="{\"inbounds\": ["
-    SOCKS5_PORT=$SOCKS5_START_PORT
-    HTTP_PORT=$HTTP_START_PORT
-    for ip in $IP_LIST; do
-        CONFIG_JSON+="{\"port\": $SOCKS5_PORT, \"protocol\": \"socks\", \"settings\": {\"auth\": \"password\", \"accounts\": [{\"user\": \"$PROXY_USER\", \"pass\": \"$PROXY_PASS\"}]}, \"listen\": \"$ip\"},"
-        CONFIG_JSON+="{\"port\": $HTTP_PORT, \"protocol\": \"http\", \"settings\": {\"auth\": \"password\", \"accounts\": [{\"user\": \"$PROXY_USER\", \"pass\": \"$PROXY_PASS\"}]}, \"listen\": \"$ip\"},"
-        SOCKS5_PORT=$((SOCKS5_PORT + 1))
-        HTTP_PORT=$((HTTP_PORT + 1))
-    done
-    CONFIG_JSON=${CONFIG_JSON%,}  # 移除最后的逗号
-    CONFIG_JSON+="]}"
-    echo -e "$CONFIG_JSON" > /etc/xrayL/config.json
+# 添加 SOCKS5 代理
+add_socks5_proxy() {
+    echo "🔹 添加 SOCKS5 代理..."
+    x-ui api add --protocol socks --port $SOCKS5_PORT --username $PROXY_USER --password $PROXY_PASS
+    echo "✅ SOCKS5 代理已添加: socks5://$PROXY_USER:$PROXY_PASS@$(hostname -I | awk '{print $1}'):$SOCKS5_PORT"
 }
 
-# 启动 Xray
-start_xray() {
-    echo "启动 Xray..."
-    systemctl restart xrayL.service || systemctl start xrayL.service
-    sleep 2
-    systemctl status xrayL.service --no-pager
+# 添加 HTTP 代理
+add_http_proxy() {
+    echo "🔹 添加 HTTP 代理..."
+    x-ui api add --protocol http --port $HTTP_PORT --username $PROXY_USER --password $PROXY_PASS
+    echo "✅ HTTP 代理已添加: http://$PROXY_USER:$PROXY_PASS@$(hostname -I | awk '{print $1}'):$HTTP_PORT"
 }
 
-# 开启防火墙端口
-echo "开启防火墙端口..."
-SOCKS5_PORT=$SOCKS5_START_PORT
-HTTP_PORT=$HTTP_START_PORT
-for ip in $IP_LIST; do
-    ufw allow $SOCKS5_PORT || true
-    ufw allow $HTTP_PORT || true
-    SOCKS5_PORT=$((SOCKS5_PORT + 1))
-    HTTP_PORT=$((HTTP_PORT + 1))
-done
-ufw reload || true
+# 运行面板
+start_3x_ui() {
+    echo "🔹 启动 3X-UI 面板..."
+    systemctl start x-ui
+    echo "✅ 3X-UI 已启动，面板地址: http://$(hostname -I | awk '{print $1}'):2053"
+}
 
-# 执行安装和配置
-install_xray
-config_xray
-start_xray
+# 主函数
+main() {
+    install_3x_ui
+    add_socks5_proxy
+    add_http_proxy
+    start_3x_ui
 
-echo "======================================"
-echo "✅ Proxy Setup Completed!"
-echo "SOCKS5 Proxies:"
-SOCKS5_PORT=$SOCKS5_START_PORT
-for ip in $IP_LIST; do
-    echo "  - socks5://$PROXY_USER:$PROXY_PASS@$ip:$SOCKS5_PORT"
-    SOCKS5_PORT=$((SOCKS5_PORT + 1))
-done
+    echo "======================================"
+    echo "✅ 3X-UI SOCKS5 + HTTP 代理配置完成！"
+    echo "📌 SOCKS5 代理: socks5://$PROXY_USER:$PROXY_PASS@$(hostname -I | awk '{print $1}'):$SOCKS5_PORT"
+    echo "📌 HTTP 代理: http://$PROXY_USER:$PROXY_PASS@$(hostname -I | awk '{print $1}'):$HTTP_PORT"
+    echo "======================================"
+}
 
-echo "HTTP Proxies:"
-HTTP_PORT=$HTTP_START_PORT
-for ip in $IP_LIST; do
-    echo "  - http://$PROXY_USER:$PROXY_PASS@$ip:$HTTP_PORT"
-    HTTP_PORT=$((HTTP_PORT + 1))
-done
-
-echo "======================================"
+# 执行主函数
+main
