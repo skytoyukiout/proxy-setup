@@ -65,20 +65,15 @@ socks pass {
 echo "[4/6] Configuring TinyProxy (HTTP)..."
 TINYPROXY_CONF="/etc/tinyproxy.conf"
 echo "PidFile \"/var/run/tinyproxy.pid\"" > $TINYPROXY_CONF
-echo "LogFile \"/var/log/tinyproxy.log\"" >> $TINYPROXY_CONF
+echo "LogFile \"syslog\"" >> $TINYPROXY_CONF  # 使用 syslog 以避免日志权限问题
 echo "MaxClients 100" >> $TINYPROXY_CONF
 echo "Allow 0.0.0.0/0" >> $TINYPROXY_CONF
 echo "BasicAuth $PROXY_USER $PROXY_PASS" >> $TINYPROXY_CONF
-
-for ip in $IP_LIST; do
-    echo "Listen $ip" >> $TINYPROXY_CONF
-    echo "Port $HTTP_PORT" >> $TINYPROXY_CONF
-    HTTP_PORT=$((HTTP_PORT + 1))
-done
-
-# 确保 TinyProxy 允许监听多个端口
-echo "ReverseOnly Yes" >> $TINYPROXY_CONF
 echo "Timeout 600" >> $TINYPROXY_CONF
+
+echo "Listen 0.0.0.0" >> $TINYPROXY_CONF
+
+echo "Port 30000" >> $TINYPROXY_CONF  # 仅绑定一个端口
 
 # 添加代理用户
 echo "[5/6] Adding Proxy User..."
@@ -94,14 +89,8 @@ echo "$PROXY_USER:$PROXY_PASS" | chpasswd
 
 # 开启防火墙端口
 echo "Opening firewall ports..."
-SOCKS5_PORT=20000
-HTTP_PORT=30000
-for ip in $IP_LIST; do
-    ufw allow $SOCKS5_PORT || true
-    ufw allow $HTTP_PORT || true
-    SOCKS5_PORT=$((SOCKS5_PORT + 1))
-    HTTP_PORT=$((HTTP_PORT + 1))
-done
+ufw allow 20000 || true
+ufw allow 30000 || true
 ufw reload || true
 
 # 重启代理服务
@@ -114,15 +103,13 @@ systemctl enable tinyproxy || true
 # 检测 HTTP 代理是否正常运行
 echo "Testing HTTP Proxy..."
 sleep 2  # 等待 tinyproxy 启动
-HTTP_TEST_IP=$(echo "$IP_LIST" | head -n 1)
-HTTP_TEST_PORT=30000
-if curl --proxy http://$PROXY_USER:$PROXY_PASS@$HTTP_TEST_IP:$HTTP_TEST_PORT -I http://google.com 2>/dev/null | grep -q "HTTP"; then
+if curl --proxy http://$PROXY_USER:$PROXY_PASS@127.0.0.1:30000 -I http://google.com 2>/dev/null | grep -q "HTTP"; then
     echo "✅ HTTP Proxy is working!"
 else
     echo "❌ HTTP Proxy test failed! Restarting service..."
     systemctl restart tinyproxy
     sleep 5
-    if curl --proxy http://$PROXY_USER:$PROXY_PASS@$HTTP_TEST_IP:$HTTP_TEST_PORT -I http://google.com 2>/dev/null | grep -q "HTTP"; then
+    if curl --proxy http://$PROXY_USER:$PROXY_PASS@127.0.0.1:30000 -I http://google.com 2>/dev/null | grep -q "HTTP"; then
         echo "✅ HTTP Proxy recovered and working!"
     else
         echo "❌ HTTP Proxy still failed! Check logs."
@@ -132,18 +119,6 @@ fi
 # 输出代理信息
 echo "======================================"
 echo "✅ Proxy Setup Completed!"
-SOCKS5_PORT=20000
-HTTP_PORT=30000
-
-echo "SOCKS5 Proxies:"
-for ip in $IP_LIST; do
-    echo "  - socks5://$PROXY_USER:$PROXY_PASS@$ip:$SOCKS5_PORT"
-    SOCKS5_PORT=$((SOCKS5_PORT + 1))
-done
-
-echo "HTTP Proxies:"
-for ip in $IP_LIST; do
-    echo "  - http://$PROXY_USER:$PROXY_PASS@$ip:$HTTP_PORT"
-    HTTP_PORT=$((HTTP_PORT + 1))
-done
+echo "SOCKS5 Proxy: socks5://$PROXY_USER:$PROXY_PASS@$(hostname -I | awk '{print $1}'):20000"
+echo "HTTP Proxy: http://$PROXY_USER:$PROXY_PASS@$(hostname -I | awk '{print $1}'):30000"
 echo "======================================"
