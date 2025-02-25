@@ -76,6 +76,10 @@ for ip in $IP_LIST; do
     HTTP_PORT=$((HTTP_PORT + 1))
 done
 
+# 确保 TinyProxy 允许监听多个端口
+echo "ReverseOnly Yes" >> $TINYPROXY_CONF
+echo "Timeout 600" >> $TINYPROXY_CONF
+
 # 添加代理用户
 echo "[5/6] Adding Proxy User..."
 if id "$PROXY_USER" &>/dev/null; then
@@ -115,7 +119,14 @@ HTTP_TEST_PORT=30000
 if curl --proxy http://$PROXY_USER:$PROXY_PASS@$HTTP_TEST_IP:$HTTP_TEST_PORT -I http://google.com 2>/dev/null | grep -q "HTTP"; then
     echo "✅ HTTP Proxy is working!"
 else
-    echo "❌ HTTP Proxy test failed! Check logs."
+    echo "❌ HTTP Proxy test failed! Restarting service..."
+    systemctl restart tinyproxy
+    sleep 5
+    if curl --proxy http://$PROXY_USER:$PROXY_PASS@$HTTP_TEST_IP:$HTTP_TEST_PORT -I http://google.com 2>/dev/null | grep -q "HTTP"; then
+        echo "✅ HTTP Proxy recovered and working!"
+    else
+        echo "❌ HTTP Proxy still failed! Check logs."
+    fi
 fi
 
 # 输出代理信息
