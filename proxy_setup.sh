@@ -1,38 +1,30 @@
 #!/bin/bash
 
-# 默认起始端口
-DEFAULT_SOCKS_PORT=20000
-DEFAULT_HTTP_PORT=30000
+DEFAULT_START_PORT_SOCKS5=20000  # 默认 SOCKS5 代理起始端口
+DEFAULT_START_PORT_HTTP=30000    # 默认 HTTP 代理起始端口
+DEFAULT_SOCKS_USERNAME="userb"   # 默认 SOCKS5 账号
+DEFAULT_SOCKS_PASSWORD="passwordb" # 默认 SOCKS5 密码
+DEFAULT_HTTP_USERNAME="userb"    # 默认 HTTP 账号
+DEFAULT_HTTP_PASSWORD="passwordb" # 默认 HTTP 密码
 
-# 读取用户输入的用户名 & 密码
-read -p "请输入 SOCKS5 代理的用户名 (默认: userb): " SOCKS_USERNAME
-SOCKS_USERNAME=${SOCKS_USERNAME:-userb}
-
-read -p "请输入 SOCKS5 代理的密码 (默认: passwordb): " SOCKS_PASSWORD
-SOCKS_PASSWORD=${SOCKS_PASSWORD:-passwordb}
-
-read -p "请输入 HTTP 代理的用户名 (默认: userb): " HTTP_USERNAME
-HTTP_USERNAME=${HTTP_USERNAME:-userb}
-
-read -p "请输入 HTTP 代理的密码 (默认: passwordb): " HTTP_PASSWORD
-HTTP_PASSWORD=${HTTP_PASSWORD:-passwordb}
-
-# 获取当前 VPS 绑定的所有 IPv4 地址
-IP_ADDRESSES=($(hostname -I))
+IP_ADDRESSES=($(hostname -I)) # 获取所有 IP 地址
 
 install_xray() {
-    echo "🔹 安装 Xray..."
-    apt-get update -y && apt-get install unzip -y || yum install unzip -y
-    wget -O /tmp/Xray.zip https://github.com/XTLS/Xray-core/releases/latest/download/Xray-linux-64.zip
-    unzip /tmp/Xray.zip -d /usr/local/bin
+    echo "安装 Xray..."
+    apt-get update -y
+    apt-get install unzip -y || yum install unzip -y
+    wget -qO /tmp/Xray.zip https://github.com/XTLS/Xray-core/releases/latest/download/Xray-linux-64.zip
+    unzip -o /tmp/Xray.zip -d /usr/local/bin/
     chmod +x /usr/local/bin/xray
+    rm -f /tmp/Xray.zip
+    mkdir -p /etc/xray
     cat <<EOF >/etc/systemd/system/xray.service
 [Unit]
 Description=Xray Proxy Service
 After=network.target
 
 [Service]
-ExecStart=/usr/local/bin/xray -c /etc/xray/config.json
+ExecStart=/usr/local/bin/xray run -c /etc/xray/config.json
 Restart=on-failure
 User=nobody
 RestartSec=3
@@ -45,40 +37,56 @@ EOF
     echo "✅ Xray 安装完成."
 }
 
-config_xray() {
-    echo "🔹 生成 Xray 配置..."
-    mkdir -p /etc/xray
-
-    # 生成 SOCKS5 和 HTTP 代理配置
-    cat <<EOF >/etc/xray/config.json
+generate_config() {
+    echo "🛠 生成 Xray 配置..."
+    cat <<EOF > /etc/xray/config.json
 {
   "inbounds": [
+EOF
+
+    PORT_SOCKS5=$DEFAULT_START_PORT_SOCKS5
+    PORT_HTTP=$DEFAULT_START_PORT_HTTP
+
+    for ip in "${IP_ADDRESSES[@]}"; do
+        cat <<EOF >> /etc/xray/config.json
     {
-      "port": $DEFAULT_SOCKS_PORT,
+      "listen": "$ip",
+      "port": $PORT_SOCKS5,
       "protocol": "socks",
       "settings": {
         "auth": "password",
-        "udp": true,
         "accounts": [
           {
-            "user": "$SOCKS_USERNAME",
-            "pass": "$SOCKS_PASSWORD"
+            "user": "$DEFAULT_SOCKS_USERNAME",
+            "pass": "$DEFAULT_SOCKS_PASSWORD"
           }
-        ]
+        ],
+        "udp": true
       }
     },
     {
-      "port": $DEFAULT_HTTP_PORT,
+      "listen": "$ip",
+      "port": $PORT_HTTP,
       "protocol": "http",
       "settings": {
         "accounts": [
           {
-            "user": "$HTTP_USERNAME",
-            "pass": "$HTTP_PASSWORD"
+            "user": "$DEFAULT_HTTP_USERNAME",
+            "pass": "$DEFAULT_HTTP_PASSWORD"
           }
-        ]
+        ],
+        "allowTransparent": false
       }
-    }
+    },
+EOF
+        ((PORT_SOCKS5++))
+        ((PORT_HTTP++))
+    done
+
+    # 删除最后一个逗号
+    sed -i '$ s/,$//' /etc/xray/config.json
+
+    cat <<EOF >> /etc/xray/config.json
   ],
   "outbounds": [
     {
@@ -88,18 +96,30 @@ config_xray() {
   ]
 }
 EOF
-
-    # 重新启动 Xray
-    systemctl restart xray.service
-    systemctl --no-pager status xray.service
-
-    echo "✅ 代理配置完成!"
-    echo "🔹 SOCKS5 代理: socks5://$SOCKS_USERNAME:$SOCKS_PASSWORD@$(hostname -I | awk '{print $1}'):$DEFAULT_SOCKS_PORT"
-    echo "🔹 HTTP 代理: http://$HTTP_USERNAME:$HTTP_PASSWORD@$(hostname -I | awk '{print $1}'):$DEFAULT_HTTP_PORT"
+    echo "✅ Xray 配置文件已生成."
 }
 
-# 确保 Xray 已安装
-[ -x "$(command -v xray)" ] || install_xray
+restart_xray() {
+    systemctl restart xray.service
+    systemctl status xray.service --no-pager
+    echo "✅ Xray 代理已启动."
+}
 
-# 生成配置并启动 Xray
-config_xray
+display_proxy_info() {
+    echo "✅ 代理配置完成!"
+    for ip in "${IP_ADDRESSES[@]}"; do
+        echo "🔹 SOCKS5 代理: socks5://$DEFAULT_SOCKS_USERNAME:$DEFAULT_SOCKS_PASSWORD@$ip:$DEFAULT_START_PORT_SOCKS5"
+        echo "🔹 HTTP  代理: http://$DEFAULT_HTTP_USERNAME:$DEFAULT_HTTP_PASSWORD@$ip:$DEFAULT_START_PORT_HTTP"
+        ((DEFAULT_START_PORT_SOCKS5++))
+        ((DEFAULT_START_PORT_HTTP++))
+    done
+}
+
+main() {
+    [ -x "$(command -v xray)" ] || install_xray
+    generate_config
+    restart_xray
+    display_proxy_info
+}
+
+main
