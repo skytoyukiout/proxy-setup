@@ -118,4 +118,5 @@ for ip in $IP_LIST; do
     echo "  - http://$PROXY_USER:$PROXY_PASS@$ip:$HTTP_PORT"
     HTTP_PORT=$((HTTP_PORT + 1))
 done
-echo "======================================"
+
+echo "======================================""
