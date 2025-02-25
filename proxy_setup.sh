@@ -1,62 +1,91 @@
 #!/bin/bash
-# 3X-UI 一键安装 SOCKS5 + HTTP 代理脚本
-# 作者: skytoyukiout
-# 适用于 Ubuntu / Debian / CentOS
 
-set -e  # 遇到错误立即退出
+# 默认配置
+DEFAULT_SOCKS_PORT=20000  # SOCKS5 起始端口
+DEFAULT_HTTP_PORT=30000   # HTTP 起始端口
+DEFAULT_SOCKS_USERNAME="userb"
+DEFAULT_SOCKS_PASSWORD="passwordb"
+DEFAULT_HTTP_USERNAME="userb"
+DEFAULT_HTTP_PASSWORD="passwordb"
 
-# 代理默认端口
-SOCKS5_PORT=20000
-HTTP_PORT=30000
+IP_ADDRESSES=($(hostname -I))  # 获取所有 IP 地址
 
-# 用户输入代理的用户名和密码
-read -p "请输入代理用户名 (默认: userb): " PROXY_USER
-PROXY_USER=${PROXY_USER:-userb}
-read -s -p "请输入代理密码 (默认: passwordb): " PROXY_PASS
-PROXY_PASS=${PROXY_PASS:-passwordb}
-echo ""
+install_xray() {
+    echo "安装 Xray..."
+    apt-get update && apt-get install -y unzip curl
+    wget https://github.com/XTLS/Xray-core/releases/download/v1.8.3/Xray-linux-64.zip
+    unzip Xray-linux-64.zip
+    mv xray /usr/local/bin/xrayL
+    chmod +x /usr/local/bin/xrayL
 
-# 安装 3x-ui
-install_3x_ui() {
-    echo "🔹 安装 3X-UI 面板..."
-    bash <(curl -Ls https://raw.githubusercontent.com/mhsanaei/3x-ui/master/install.sh)
-    echo "✅ 3X-UI 安装完成！"
+    # 创建 Systemd 服务
+    cat <<EOF >/etc/systemd/system/xrayL.service
+[Unit]
+Description=XrayL Service
+After=network.target
+
+[Service]
+ExecStart=/usr/local/bin/xrayL -c /etc/xrayL/config.json
+Restart=on-failure
+User=nobody
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+    systemctl daemon-reload
+    systemctl enable xrayL.service
+    systemctl start xrayL.service
+    echo "✅ Xray 安装完成."
 }
 
-# 添加 SOCKS5 代理
-add_socks5_proxy() {
-    echo "🔹 添加 SOCKS5 代理..."
-    x-ui api add --protocol socks --port $SOCKS5_PORT --username $PROXY_USER --password $PROXY_PASS
-    echo "✅ SOCKS5 代理已添加: socks5://$PROXY_USER:$PROXY_PASS@$(hostname -I | awk '{print $1}'):$SOCKS5_PORT"
+config_xray() {
+    mkdir -p /etc/xrayL
+
+    # 配置 JSON
+    cat <<EOF >/etc/xrayL/config.json
+{
+  "inbounds": [
+EOF
+
+    # 添加 SOCKS5 代理
+    for ((i = 0; i < ${#IP_ADDRESSES[@]}; i++)); do
+        PORT=$((DEFAULT_SOCKS_PORT + i))
+        echo "    {\"port\": $PORT, \"protocol\": \"socks\", \"listen\": \"0.0.0.0\",
+              \"settings\": {\"auth\": \"password\", \"accounts\": [{\"user\": \"$DEFAULT_SOCKS_USERNAME\", \"pass\": \"$DEFAULT_SOCKS_PASSWORD\"}]},
+              \"tag\": \"socks_$i\"}," >> /etc/xrayL/config.json
+        echo "✅ SOCKS5 代理已添加: socks5://$DEFAULT_SOCKS_USERNAME:$DEFAULT_SOCKS_PASSWORD@${IP_ADDRESSES[i]}:$PORT"
+    done
+
+    # 添加 HTTP 代理
+    for ((i = 0; i < ${#IP_ADDRESSES[@]}; i++)); do
+        PORT=$((DEFAULT_HTTP_PORT + i))
+        echo "    {\"port\": $PORT, \"protocol\": \"http\", \"listen\": \"0.0.0.0\",
+              \"settings\": {\"accounts\": [{\"user\": \"$DEFAULT_HTTP_USERNAME\", \"pass\": \"$DEFAULT_HTTP_PASSWORD\"}]},
+              \"tag\": \"http_$i\"}," >> /etc/xrayL/config.json
+        echo "✅ HTTP 代理已添加: http://$DEFAULT_HTTP_USERNAME:$DEFAULT_HTTP_PASSWORD@${IP_ADDRESSES[i]}:$PORT"
+    done
+
+    # 删除最后的逗号，避免 JSON 语法错误
+    sed -i '$ s/,$//' /etc/xrayL/config.json
+
+    # 继续写出bounds配置
+    cat <<EOF >> /etc/xrayL/config.json
+  ],
+  "outbounds": [
+    { "protocol": "freedom", "tag": "direct" }
+  ]
+}
+EOF
+
+    systemctl restart xrayL.service
+    systemctl --no-pager status xrayL.service
 }
 
-# 添加 HTTP 代理
-add_http_proxy() {
-    echo "🔹 添加 HTTP 代理..."
-    x-ui api add --protocol http --port $HTTP_PORT --username $PROXY_USER --password $PROXY_PASS
-    echo "✅ HTTP 代理已添加: http://$PROXY_USER:$PROXY_PASS@$(hostname -I | awk '{print $1}'):$HTTP_PORT"
-}
-
-# 运行面板
-start_3x_ui() {
-    echo "🔹 启动 3X-UI 面板..."
-    systemctl start x-ui
-    echo "✅ 3X-UI 已启动，面板地址: http://$(hostname -I | awk '{print $1}'):2053"
-}
-
-# 主函数
 main() {
-    install_3x_ui
-    add_socks5_proxy
-    add_http_proxy
-    start_3x_ui
-
-    echo "======================================"
-    echo "✅ 3X-UI SOCKS5 + HTTP 代理配置完成！"
-    echo "📌 SOCKS5 代理: socks5://$PROXY_USER:$PROXY_PASS@$(hostname -I | awk '{print $1}'):$SOCKS5_PORT"
-    echo "📌 HTTP 代理: http://$PROXY_USER:$PROXY_PASS@$(hostname -I | awk '{print $1}'):$HTTP_PORT"
-    echo "======================================"
+    [ -x "$(command -v xrayL)" ] || install_xray
+    config_xray
 }
 
-# 执行主函数
 main
