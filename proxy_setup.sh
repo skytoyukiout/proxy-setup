@@ -10,6 +10,12 @@ read -p "Enter Proxy Username: " PROXY_USER
 read -s -p "Enter Proxy Password: " PROXY_PASS
 echo ""
 
+# 确保用户名不为空
+if [[ -z "$PROXY_USER" ]]; then
+    echo "❌ Error: Username cannot be empty!"
+    exit 1
+fi
+
 # 确保系统更新并安装必要软件
 echo "[1/6] Updating system and installing required packages..."
 apt update -y && apt install -y dante-server tinyproxy net-tools curl ufw || { echo "Package installation failed!"; exit 1; }
@@ -75,8 +81,11 @@ echo "[5/6] Adding Proxy User..."
 if id "$PROXY_USER" &>/dev/null; then
     echo "User $PROXY_USER already exists, skipping creation."
 else
-    useradd -M $PROXY_USER || { echo "Failed to add user!"; exit 1; }
+    # 创建用户，但不创建 home 目录
+    useradd -M -s /bin/false "$PROXY_USER" || { echo "❌ Failed to add user!"; exit 1; }
 fi
+
+# 设置用户密码
 echo "$PROXY_USER:$PROXY_PASS" | chpasswd
 
 # 开启防火墙端口
