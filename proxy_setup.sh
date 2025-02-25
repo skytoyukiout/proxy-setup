@@ -1,7 +1,6 @@
 #!/bin/bash
-# Xray SOCKS5 + HTTP 代理一键安装
-# 自动检测 VPS 上的公网 IP，并创建 SOCKS5 和 HTTP 代理
-# 适用于 Ubuntu/Debian，确保 SOCKS5 和 HTTP 代理同时可用
+# 自动安装 Xray 并同时配置 SOCKS5 和 HTTP 代理
+# 支持多 IP 绑定，端口递增，允许用户自定义用户名和密码
 
 set -e  # 遇到错误立即退出
 
@@ -68,8 +67,8 @@ config_xray() {
     SOCKS5_PORT=$SOCKS5_START_PORT
     HTTP_PORT=$HTTP_START_PORT
     for ip in $IP_LIST; do
-        CONFIG_JSON+="{\"port\": $SOCKS5_PORT, \"protocol\": \"socks\", \"settings\": {\"auth\": \"password\", \"accounts\": [{\"user\": \"$PROXY_USER\", \"pass\": \"$PROXY_PASS\"}]}, \"listen\": \"$ip\"},"
-        CONFIG_JSON+="{\"port\": $HTTP_PORT, \"protocol\": \"http\", \"settings\": {\"auth\": \"password\", \"accounts\": [{\"user\": \"$PROXY_USER\", \"pass\": \"$PROXY_PASS\"}]}, \"listen\": \"$ip\"},"
+        CONFIG_JSON+="{\"port\": $SOCKS5_PORT, \"protocol\": \"socks\", \"settings\": {\"auth\": \"password\", \"accounts\": [{\"user\": \"$PROXY_USER\", \"pass\": \"$PROXY_PASS\"}], \"udp\": true}, \"listen\": \"$ip\", \"sniffing\": {\"enabled\": true, \"destOverride\": [\"http\", \"tls\"]}},"
+        CONFIG_JSON+="{\"port\": $HTTP_PORT, \"protocol\": \"http\", \"settings\": {\"auth\": \"password\", \"accounts\": [{\"user\": \"$PROXY_USER\", \"pass\": \"$PROXY_PASS\"}]}, \"listen\": \"$ip\", \"sniffing\": {\"enabled\": true, \"destOverride\": [\"http\", \"tls\"]}},"
         SOCKS5_PORT=$((SOCKS5_PORT + 1))
         HTTP_PORT=$((HTTP_PORT + 1))
     done
