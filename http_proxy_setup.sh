@@ -1,73 +1,129 @@
 #!/bin/bash
+# 自动检测 VPS 上的公网 IP，并创建 SOCKS5 和 HTTP 代理（端口递增）
+# 修复 HTTP 代理可能丢失的问题，确保 TinyProxy 可用
 
-# 获取传入的用户名、密码
-USER=${1:-user}      # 默认用户名 user
-PASS=${2:-pass}      # 默认密码 pass
-START_PORT=${3:-30000}  # 默认起始端口 30000
+echo "=============================="
+echo "  Auto Proxy Setup Script 🚀"
+echo "=============================="
 
-# 检测系统类型 (Debian/Ubuntu 或 CentOS)
-if [[ -f /etc/debian_version ]]; then
-    OS="debian"
-elif [[ -f /etc/redhat-release ]]; then
-    OS="centos"
-else
-    echo "Unsupported OS"
+# 让用户输入代理的用户名和密码
+read -p "Enter Proxy Username: " PROXY_USER
+read -s -p "Enter Proxy Password: " PROXY_PASS
+echo ""
+
+# 确保系统更新并安装必要软件
+echo "[1/5] Updating system and installing required packages..."
+apt update -y && apt install -y dante-server tinyproxy net-tools curl
+
+# 获取 VPS 上的所有公网 IP
+echo "[2/5] Detecting Public IPs..."
+IP_LIST=$(ip -o -4 addr show | awk '{print $4}' | cut -d'/' -f1 | grep -E '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$' | grep -v "127.0.0.1")
+
+if [ -z "$IP_LIST" ]; then
+    echo "❌ No public IPs detected! Exiting..."
     exit 1
 fi
 
-# 安装 3proxy 代理软件
-install_3proxy() {
-    if [[ "$OS" == "debian" ]]; then
-        apt update && apt install -y 3proxy
-    elif [[ "$OS" == "centos" ]]; then
-        yum install -y epel-release && yum install -y 3proxy
-    fi
+echo "✅ Found the following Public IPs:"
+echo "$IP_LIST"
+
+# 设置起始端口
+SOCKS5_PORT=20000
+HTTP_PORT=30000
+
+# 生成 Dante（SOCKS5）配置文件
+echo "[3/5] Configuring Dante (SOCKS5)..."
+DANTE_CONF="/etc/danted.conf"
+
+echo "logoutput: stderr" > $DANTE_CONF
+
+for ip in $IP_LIST; do
+    echo "internal: $ip port = $SOCKS5_PORT" >> $DANTE_CONF
+    echo "external: $ip" >> $DANTE_CONF
+    SOCKS5_PORT=$((SOCKS5_PORT + 1))
+done
+
+echo "
+method: username
+user.privileged: root
+user.unprivileged: nobody
+
+client pass {
+    from: 0.0.0.0/0 to: 0.0.0.0/0
+    log: connect disconnect
 }
 
-install_3proxy
+socks pass {
+    from: 0.0.0.0/0 to: 0.0.0.0/0
+    log: connect disconnect
+}
+" >> $DANTE_CONF
 
-# 获取所有 IPv4 地址（去掉 IPv6）
-IP_LIST=$(hostname -I | tr ' ' '\n' | grep -E "^[0-9]+\.[0-9]+")
+# 生成 tinyproxy 配置文件
+echo "[4/5] Configuring TinyProxy (HTTP)..."
+TINYPROXY_CONF="/etc/tinyproxy.conf"
+echo "PidFile \"/var/run/tinyproxy.pid\"" > $TINYPROXY_CONF  # 确保 TinyProxy 运行
+echo "LogFile \"/var/log/tinyproxy.log\"" >> $TINYPROXY_CONF
+echo "MaxClients 100" >> $TINYPROXY_CONF
+echo "Allow 0.0.0.0/0" >> $TINYPROXY_CONF
+echo "BasicAuth $PROXY_USER $PROXY_PASS" >> $TINYPROXY_CONF
 
-# 初始化端口计数器
-PORT=$START_PORT
-
-# 创建 3proxy 配置文件
-echo "daemon
-maxconn 200
-nserver 8.8.8.8
-nserver 8.8.4.4
-auth strong
-users $USER:CL:$PASS" > /etc/3proxy.cfg
-
-# 绑定每个 IP 到不同端口
-for IP in $IP_LIST; do
-    echo "proxy -n -a -p$PORT -i$IP -e$IP" >> /etc/3proxy.cfg
-    ((PORT++))
+for ip in $IP_LIST; do
+    echo "Listen $ip" >> $TINYPROXY_CONF
+    echo "Port $HTTP_PORT" >> $TINYPROXY_CONF
+    HTTP_PORT=$((HTTP_PORT + 1))
 done
 
-# 允许端口访问
-if [[ "$OS" == "debian" ]]; then
-    for ((i=START_PORT; i<PORT; i++)); do
-        ufw allow $i/tcp
-    done
-elif [[ "$OS" == "centos" ]]; then
-    for ((i=START_PORT; i<PORT; i++)); do
-        firewall-cmd --permanent --add-port=$i/tcp
-    done
-    firewall-cmd --reload
-fi
+# 确保 TinyProxy 允许多个监听 IP
+sed -i 's/^#Allow/Allow/' $TINYPROXY_CONF
 
-# 启动 3proxy 代理服务
-pkill 3proxy
-nohup 3proxy /etc/3proxy.cfg > /dev/null 2>&1 &
+# 添加代理用户
+echo "[5/5] Adding Proxy User..."
+useradd -M $PROXY_USER || true
+echo "$PROXY_USER:$PROXY_PASS" | chpasswd
 
-echo "HTTP Proxy Setup Complete!"
-echo "=========================="
-echo "Proxy IPs:"
-PORT=$START_PORT
-for IP in $IP_LIST; do
-    echo "http://$USER:$PASS@$IP:$PORT"
-    ((PORT++))
+# 开启防火墙端口
+echo "Opening firewall ports..."
+SOCKS5_PORT=20000
+HTTP_PORT=30000
+
+for ip in $IP_LIST; do
+    ufw allow $SOCKS5_PORT
+    ufw allow $HTTP_PORT
+    SOCKS5_PORT=$((SOCKS5_PORT + 1))
+    HTTP_PORT=$((HTTP_PORT + 1))
 done
-echo "=========================="
+ufw reload
+
+# 重启代理服务
+echo "Restarting services..."
+systemctl restart danted
+systemctl enable danted
+systemctl restart tinyproxy
+systemctl enable tinyproxy
+
+# 检测 HTTP 代理是否正常运行
+echo "Testing HTTP Proxy..."
+sleep 2  # 等待 tinyproxy 启动
+HTTP_TEST_IP=$(echo "$IP_LIST" | head -n 1)
+HTTP_TEST_PORT=30000
+curl --proxy http://$PROXY_USER:$PROXY_PASS@$HTTP_TEST_IP:$HTTP_TEST_PORT -I http://google.com 2>/dev/null | grep HTTP
+
+# 输出代理信息
+echo "======================================"
+echo "✅ Proxy Setup Completed!"
+SOCKS5_PORT=20000
+HTTP_PORT=30000
+
+echo "SOCKS5 Proxies:"
+for ip in $IP_LIST; do
+    echo "  - socks5://$PROXY_USER:$PROXY_PASS@$ip:$SOCKS5_PORT"
+    SOCKS5_PORT=$((SOCKS5_PORT + 1))
+done
+
+echo "HTTP Proxies:"
+for ip in $IP_LIST; do
+    echo "  - http://$PROXY_USER:$PROXY_PASS@$ip:$HTTP_PORT"
+    HTTP_PORT=$((HTTP_PORT + 1))
+done
+echo "======================================"
